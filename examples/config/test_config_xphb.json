@@ -1,0 +1,10 @@
+{
+  "from" : [
+    "XPHB"
+  ],
+  "paths" : {
+    "compendium" : "/compendium/",
+    "rules" : "/compendium/rules/"
+  },
+  "useDiceRoller" : true
+}
