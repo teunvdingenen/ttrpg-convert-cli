@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Function;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -30,6 +31,8 @@ import dev.ebullient.convert.qute.SourceAndPage;
 import dev.ebullient.convert.tools.JsonNodeReader;
 import dev.ebullient.convert.tools.MarkdownConverter;
 import dev.ebullient.convert.tools.ToolsIndex;
+import dev.ebullient.convert.tools.dnd5e.ItemMastery.CustomItemMastery;
+import dev.ebullient.convert.tools.dnd5e.ItemMastery.MasteryEnum;
 import dev.ebullient.convert.tools.dnd5e.ItemProperty.CustomItemProperty;
 import dev.ebullient.convert.tools.dnd5e.ItemProperty.PropertyEnum;
 import dev.ebullient.convert.tools.dnd5e.ItemType.CustomItemType;
@@ -48,10 +51,10 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
         return instance;
     }
 
-    // classfeature|ability score improvement|monk|phb|12
+    // classfeature|ability score improvement|monk|xphb|12
     static final String classFeature_1 = "classfeature\\|[^|]+\\|[^|]+\\|";
     static final String classFeature_2 = "\\|\\d+\\|?";
-    // subclassfeature|blessed strikes|cleric|phb|death|dmg|8|uaclassfeaturevariants
+    // subclassfeature|blessed strikes|cleric|xphb|death|dmg|8|uaclassfeaturevariants
     static final String subclassFeature_1 = "subclassfeature\\|[^|]+\\|[^|]+\\|";
     static final String subclassFeature_2 = "\\|[^|]+\\|";
     static final String subclassFeature_3 = "\\|\\d+\\|?";
@@ -444,9 +447,18 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
                 TtrpgValue.indexKey.setIn(v.node, v.key);
                 Tools5eSources.constructSources(v.node);
 
+                if (variantIndex.containsKey(v.key) && variantIndex.get(v.key).has("reprintedAs")) {
+                    variantIndex.remove(v.key);
+                    tui().debugf("Removed %s from index", v.key);
+                }
                 JsonNode old = variantIndex.put(v.key, v.node);
                 if (old != null && !old.equals(v.node)) {
-                    tui().errorf("Duplicate key: %s%nold: %s%nnew: %s", v.key, old, v.node);
+                    String message = String.format("Duplicate key: %s%nold: %s%nnew: %s", v.key, old, v.node);
+                    if (v.node.has("reprintedAs")) {
+                        tui().debugf(message);
+                    } else {
+                        tui().errorf(message);
+                    }
                 }
             });
 
@@ -517,9 +529,9 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
                 String[] parts = srKey.split("\\|");
                 String source = SourceField.source.getTextOrThrow(sr);
                 final String lookupKey;
-                if (parts[1].contains("(")) { // "subrace|dwarf (duergar)|dwarf|phb|mtf"
+                if (parts[1].contains("(")) { // "subrace|dwarf (duergar)|dwarf|xphb|mtf"
                     lookupKey = String.format("race|%s|%s", parts[1], source).toLowerCase();
-                } else { // "subrace|half-elf|half-elf|phb"
+                } else { // "subrace|half-elf|half-elf|xphb"
                     if (parts[1].equals(parts[2])) {
                         lookupKey = String.format("race|%s|%s", parts[1], source).toLowerCase();
                     } else {
@@ -536,7 +548,7 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
     }
 
     private List<Tuple> findDeities(List<Tuple> allDeities) {
-        List<String> reverseOrder = List.of("dsotdq", "erlw", "mtf", "vgm", "scag", "dmg", "phb");
+        List<String> reverseOrder = List.of("dsotdq", "erlw", "mtf", "vgm", "scag", "dmg");
         List<Tuple> result = new ArrayList<>();
         Map<String, List<Tuple>> booklist = new HashMap<>();
 
@@ -629,7 +641,7 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
                     }
                 }
                 for (Entry<String, JsonNode> sourceClassSubclassMap : iterableFields(spellMap.get("subclass"))) {
-                    String classSource = sourceClassSubclassMap.getKey(); // PHB, XGE, etc
+                    String classSource = sourceClassSubclassMap.getKey(); // XPHB, XGE, etc
                     if (!sourceIncluded(classSource)) {
                         // skip it
                         continue;
@@ -637,7 +649,7 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
                     for (Entry<String, JsonNode> classMap : iterableFields(sourceClassSubclassMap.getValue())) {
                         String className = classMap.getKey(); // Bard, Cleric, etc
                         for (Entry<String, JsonNode> sourceSubclassMap : iterableFields(classMap.getValue())) {
-                            String subclassSource = sourceSubclassMap.getKey(); // PHB, XGE, etc
+                            String subclassSource = sourceSubclassMap.getKey(); // XPHB, XGE, etc
                             if (!sourceIncluded(subclassSource)) {
                                 // skip it
                                 continue;
@@ -659,16 +671,27 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
     }
 
     boolean isReprinted(String finalKey, JsonNode jsonSource) {
+        final Pattern sourcePattern = Pattern.compile("\"uid\"\\s:\\s\"[A-Za-z ]+\\|([A-Z]+)\"");
         if (jsonSource.has("reprintedAs")) {
             // "reprintedAs": [ "Deep Gnome|MPMM" ]
             // If any reprinted source is included, skip this in favor of the reprint
             for (Iterator<JsonNode> i = jsonSource.withArray("reprintedAs").elements(); i.hasNext();) {
                 String reprint = i.next().asText();
                 String[] ra = reprint.split("\\|");
-                if (sourceIncluded(ra[1])) {
+                boolean srcinc = false;
+                if (ra.length < 2) {
+                    Matcher m = sourcePattern.matcher(reprint);
+                    if (m.find()) {
+                        srcinc = sourceIncluded(m.group(2));
+                    }
+                } else {
+                    srcinc = sourceIncluded(ra[1]);
+                }
+                if (srcinc) {
                     Tools5eIndexType type = Tools5eIndexType.getTypeFromKey(finalKey);
                     String primarySource = jsonSource.get("source").asText().toLowerCase();
-                    String reprintKey = type + "|" + reprint.toLowerCase();
+                    String reprintKey = type + "|" + reprint;
+                    reprintKey = reprintKey.toLowerCase();
                     if (type == Tools5eIndexType.subrace && !variantIndex.containsKey(reprintKey)) {
                         reprintKey = Tools5eIndexType.race + "|" + reprint.toLowerCase();
                         if (!variantIndex.containsKey(reprintKey)) {
@@ -676,9 +699,12 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
                         }
                     }
                     if (!variantIndex.containsKey(reprintKey)) {
-                        reprintKey = aliases.get(reprintKey);
-                        if (reprintKey == null) {
-                            tui().errorf("Unable to find reprint of %s: %s", finalKey, reprint);
+                        String alias = aliases.get(reprintKey);
+                        if (alias == null) {
+                            tui().warnf("Unable to find reprint of %s: %s (Reprint key: %s)", finalKey, reprint, reprintKey);
+                            String item = String.format("|%s|", reprintKey.split("\\|")[1]);
+                            tui().warnf("%s is present", variantIndex.keySet().stream().filter(key -> key.contains(item))
+                                    .collect(Collectors.toSet()).toString());
                             return false;
                         }
                     }
@@ -771,6 +797,9 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
             return null;
         }
         HomebrewMetaTypes meta = homebrewMetaTypes.get(sources.primarySource());
+        if (abbreviation.contains("|")) {
+            abbreviation = abbreviation.split("|")[0];
+        }
         ItemProperty prop = PropertyEnum.fromEncodedType(abbreviation);
         if (prop == null && meta != null) {
             prop = meta.getItemProperty(abbreviation);
@@ -782,11 +811,29 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
         return prop;
     }
 
+    public ItemMastery findItemMastery(String name, Tools5eSources sources) {
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+        if (name.contains("|")) {
+            name = name.split("\\|")[0];
+        }
+        ItemMastery mastery = MasteryEnum.fromName(name);
+        if (mastery == null) {
+            tui().errorf("Unknown mastery %s for %s", name, sources);
+            return new CustomItemMastery(name);
+        }
+        return mastery;
+    }
+
     public ItemType findItemType(String abbreviation, Tools5eSources sources) {
         if (abbreviation == null || abbreviation.isEmpty()) {
             return null;
         }
         HomebrewMetaTypes meta = homebrewMetaTypes.get(sources.primarySource());
+        if (abbreviation.contains("|")) {
+            abbreviation = abbreviation.split("|")[0];
+        }
         ItemType itemType = ItemEnum.fromEncodedValue(abbreviation);
         if (itemType == null && meta != null) {
             itemType = meta.getItemType(abbreviation);
@@ -976,7 +1023,7 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
 
         // Special case for class features (match against constructed patterns)
         if (key.contains("classfeature|")) {
-            String featureKey = key.replace("||", "|phb|");
+            String featureKey = key.replace("||", "|xphb|");
             return classFeaturePattern.matcher(featureKey).matches() || subclassFeaturePattern.matcher(featureKey).matches();
         }
         // Familiars
@@ -1270,7 +1317,7 @@ public class Tools5eIndex implements JsonSource, ToolsIndex {
                 case "AS:V2-UA" -> "UARSC";
                 case "MV:C2-UA" -> "UARCO";
                 case "OR" -> "UACDW";
-                default -> "PHB";
+                default -> "XPHB";
             };
         }
 
